@@ -1,9 +1,9 @@
-# 串口DMA方式发送&接收
-笔者使用的是STM32F407VET6，共包含6路串口，页尾处程序已将全部串口的DMA收发配置完成，本文仅以串口1为例进行讲解。
+# Serial port DMA mode sending & receiving
+The author is using STM32F407VET6, which contains a total of 6 serial ports. The program at the end of the page has completed the DMA transceiver configuration of all serial ports. This article only uses serial port 1 as an example to explain.
 
-该工程为寄存器版本，不过在库函数中仍可添加使用
+This project is a register version, but it can still be added and used in library functions.
 
-使用资源：
+Use resources:
 | Model  | DMA               | I/O       |
 | ------ |:-----------------:|:---------:|
 | USART1 | DMA2_7_CH4 (USART1_TX)<br>DMA2_5_CH4 (USART1_RX) | PA9<br>PA10  |
@@ -13,173 +13,173 @@
 | UART5  | DMA1_7_CH4 (USART5_TX)<br>DMA1_0_CH4 (USART5_RX) | PC12<br>PD2  |
 | USART6 | DMA2_6_CH5 (USART6_TX)<br>DMA2_1_CH5 (USART6_RX) | PC6<br>PC7   |
 
-【中断】:6个串口空闲接收中断，6个DMA接收完成中断（共12个，设置为组2，优先级(3,3)~(1,0)）
+[Interrupt]: 6 serial port idle reception interrupts, 6 DMA reception completion interrupts (12 in total, set to group 2, priority (3,3)~(1,0))
 
-## 1 STM32F4 DMA 简介  
-DMA，全称为：Direct Memory Access，即直接存储器访问。DMA 传输方式无需 CPU 直接控制传输，也没有中断处理方式那样保留现场和恢复现场的过程，通过硬件为 RAM 与 I/O 设备开辟一条直接传送数据的通路，能使 CPU 的效率大为提高。  
-STM32F4 最多有 2 个 DMA 控制器（DMA1 和 DMA2），共 16 个数据流（每个控制器 8 个），每一个 DMA 控制器都用于管理一个或多个外设的存储器访问请求。每个数据流总共可以有多达 8个通道（或称请求）。每个数据流通道都有一个仲裁器，用于处理 DMA 请求间的优先级。  
+## 1 STM32F4 DMA Introduction  
+DMA, full name: Direct Memory Access, that is, direct memory access. The DMA transfer method does not require the CPU to directly control the transmission, and there is no process of retaining and restoring the scene like the interrupt processing method. The hardware opens a direct transmission path for RAM and I/O devices, which can greatly improve the efficiency of the CPU.  
+STM32F4 has up to 2 DMA controllers (DMA1 and DMA2), with a total of 16 data streams (8 per controller). Each DMA controller is used to manage memory access requests of one or more peripherals. Each data stream can have up to 8 channels (or requests) in total. Each data flow channel has an arbiter that handles priority among DMA requests.  
 
-它可以处理一下事务：
+It can handle the following transactions:
 
-1.外设到储存器的传输
-2.储存器到外设的传输
-3.储存器到储存器的传输
+1. Peripheral to memory transfer
+2. Transfer from memory to peripherals
+3. Storage-to-storage transfer
 
-> 【注】：DMA1 控制器 AHB 外设端口与 DMA2 控制器的情况不同，不连接到总线矩阵，因此，仅 DMA2 数据流能够执行存储器到  
+> [Note]: The DMA1 controller AHB peripheral port is different from the DMA2 controller and is not connected to the bus matrix. Therefore, only the DMA2 data flow can perform memory to  
 
-存储器的传输。
+memory transfer.
 
-其中，数据流的多通道选择，是通过 DMA_SxCR 寄存器控制的，如图1所示：
+Among them, the multi-channel selection of data streams is controlled through the DMA_SxCR register, as shown in Figure 1:
 
 <p align="center"><img src="Pictures/1.png" width="90%"\></p>
-<p align="center" style="color:orange; font-size:14px; color: #999; " >图1 通道选择</p>
+<p align="center" style="color:orange; font-size:14px; color: #999; " >Figure 1 Channel selection</p>
 
-上图可以看出，DMA_SxCR 控制数据流到底使用哪一个通道，每个数据流有 8 个通道可供选择，但每次只能选择其中一个通道进行 DMA 传输，DMA2 的各数据流通道映射表，如表 1 所示
+As can be seen from the above figure, DMA_SxCR controls which channel the data stream uses. Each data stream has 8 channels to choose from, but only one channel can be selected for DMA transmission at a time. The channel mapping table of each data stream of DMA2 is, As shown in Table 1
 
 <p align="center"><img src="Pictures/2.png" width="90%"\></p>
-<p align="center" style="color:orange; font-size:14px; color: #999; " >1 DMA2数据流映射表</p>
+<p align="center" style="color:orange; font-size:14px; color: #999; " >1 DMA2 data flow mapping table</p>
 
-上表就列出了 DMA2 所有可能的选择情况，来总共 64 种组合，比如本章我们要实现串口1的 DMA 发送，即USART1_TX，就必须选择 DMA2 的数据流 7，通道 4，来进行 DMA 传输。这里注意一下，有的外设（比如 USART1_RX）可能有多个通道可以选择，随意选择一个就可以。
+The above table lists all possible selections of DMA2, with a total of 64 combinations. For example, in this chapter, if we want to implement DMA transmission of serial port 1, that is, USART1_TX, we must select data stream 7 and channel 4 of DMA2 for DMA transmission. Note here that some peripherals (such as USART1_RX) may have multiple channels to choose from, just choose one at will.
 
-## 重要寄存器简介
+## Introduction to important registers
 
-**（1） DMA 中断状态寄存器**
+**(1) DMA interrupt status register**
 
-该寄存器总共有 2 个：DMA_LISR 和 DMA_HISR，每个寄存器管理 4 数据流（总共 8 个），DMA_LISR 寄存器用于管理数据流 0~3，而 DMA_HISR 用于管理数据流 4~7。如果开启了 DMA_LISR 中这些位对应的中断，则在达到条件后就会跳到中断服务函数里面去，即使没开启，也可以通过查询这些位来获得当前 DMA 传输的状态。这里常用的是 TCIFx位，即数据流 x 的 DMA 传输完成与否标志。
+There are a total of 2 registers: DMA_LISR and DMA_HISR. Each register manages 4 data streams (8 in total). The DMA_LISR register is used to manage data streams 0~3, while DMA_HISR is used to manage data streams 4~7. If the interrupt corresponding to these bits in DMA_LISR is enabled, it will jump to the interrupt service function after the condition is met. Even if it is not enabled, the current DMA transfer status can be obtained by querying these bits. What is commonly used here is the TCIFx bit, which is the DMA transfer completion flag of data stream x.
 
-> 【注意】：此寄存器为只读寄存器，所以在这些位被置位之后，只能通过【中断标志清除寄存器】来清除。
+> [Note]: This register is a read-only register, so after these bits are set, they can only be cleared through [Interrupt Flag Clear Register].
 
-**（2）DMA 中断标志清除寄存器**  
+**(2) DMA interrupt flag clear register**  
 
-该寄存器同样有 2 个：DMA_LIFCR 和 DMA_HIFCR，同样是每个寄存器控制 4 个数据流。该寄存器为只写寄存器，其各位就是用来清除 【中断状态寄存器】的对应位的，通过写 1 清除。
+There are also 2 registers: DMA_LIFCR and DMA_HIFCR. Each register also controls 4 data streams. This register is a write-only register, and its bits are used to clear the corresponding bits of the [Interrupt Status Register]. They are cleared by writing 1.
 
-**（3） DMA 数据流 x 配置寄存器（DMA_SxCR）**
+**(3) DMA data stream x configuration register (DMA_SxCR)**
 
- 该寄存器控制着 DMA 的很多相关信息，包括数据宽度、外设及存储器的宽度、优先级、增量模式、传输方向、中断允许、使能等都是通过该寄存器来设置的。所以 DMA_ SxCR 是 DMA 传输的核心控制寄存器。
+ This register controls a lot of DMA related information, including data width, peripheral and memory width, priority, incremental mode, transfer direction, interrupt enable, enable, etc., which are all set through this register. So DMA_ SxCR is the core control register of DMA transfer.
  
-**（4）DMA 数据流 x 数据项数寄存器（DMA_SxNDTR）**
+**(4) DMA data stream x data item number register (DMA_SxNDTR)**
  
- 这个寄存器控制 DMA 数据流 x 的每次传输所要传输的数据量。其设置范围为 0~65535。并且该寄存器的值会随着传输的进行而减少，当该寄存器的值为 0 的时候就代表此次数据传输已经全部发送完成了。所以可以通过这个寄存器的值来知道当前DMA 传输的进度。
+ This register controls the amount of data to be transferred for each transfer of DMA data stream x. Its setting range is 0~65535. And the value of this register will decrease as the transmission progresses. When the value of this register is 0, it means that all the data transmission has been completed. Therefore, the progress of the current DMA transfer can be known through the value of this register.
  
- > 【注意】：这里是数据项数目，而不是指的字节数。比如设置数据位宽为 16 位，那么传输一次（一个项）就是 2 个字节
+ > [Note]: This is the number of data items, not the number of bytes. For example, if the data bit width is set to 16 bits, then one transmission (one item) is 2 bytes
 
-**（5）DMA 数据流 x 的外设地址寄存器（DMA_SxPAR）**
+**(5)Peripheral address register (DMA_SxPAR) of DMA data stream x**
 
-该寄存器用来存储 STM32F4 外设的地址，比如使用串口 1，那么该寄存器必须写入 0x40011004（其实就是&USART1_DR）。
+This register is used to store the address of the STM32F4 peripheral. For example, if serial port 1 is used, then this register must be written with 0x40011004 (actually &USART1_DR).
 
-**（6） DMA 数据流 x 的存储器地址寄存器**
+**(6) Memory address register of DMA data stream x**
 
-由于 STM32F4 的 DMA 支持双缓存，所以存储器地址寄存器有两个：DMA_SxM0AR 和 DMA_SxM1AR，其中 DMA_SxM1AR 仅在双缓冲模式下，才有效。比如使用 USART1_TX_BUF[USART_LEN] 数组来做存储器，那么在DMA_SxM0AR 中写入 &USART1_TX_BUF 就可以了。
+Since the DMA of STM32F4 supports double buffering, there are two memory address registers: DMA_SxM0AR and DMA_SxM1AR, among which DMA_SxM1AR is only valid in double buffering mode. For example, if you use the USART1_TX_BUF[USART_LEN] array as memory, then write &USART1_TX_BUF in DMA_SxM0AR.
 
-## 2 收发配置
+## 2 Transceiver configuration
 
-### 2.1串口配置（使能DMA收发）
+### 2.1 Serial port configuration (enable DMA transceiver)
 
-重点：使能串口1的接收、发送和串口1的DMA接收、发送并使能串口1的空闲中断
+Key points: Enable the reception and transmission of serial port 1 and the DMA reception and transmission of serial port 1 and enable the idle interrupt of serial port 1
 
 ```
 /*------------------------------------------------  
-* 函数名：void Init_USART1(u32 pclk2,u32 bound)  
-* 功  能：初始化IO 串口1  
-* 参  数：pclk2: PCLK2时钟频率(Mhz)  
-	      bound: 波特率   
-* 返回值： 无  
+* Function name: void Init_USART1(u32 pclk2,u32 bound)  
+* Function: Initialize IO serial port 1  
+* Parameter: pclk2: PCLK2 clock frequency (Mhz)  
+	      bound: baud rate   
+* Return value: None  
 ------------------------------------------------*/  
 void Init_USART1(u32 pclk2,u32 bound)  
 {  	   
 	float temp;  
 	u16 mantissa;  
 	u16 fraction;	     
-	temp=(float)(pclk2*1000000)/(bound*16);//得到USARTDIV@OVER8=0  
-	mantissa=temp;				 //得到整数部分  
-	fraction=(temp-mantissa)*16; //得到小数部分@OVER8=0   
+	temp=(float)(pclk2*1000000)/(bound*16);//get USARTDIV@OVER8=0  
+	mantissa=temp; //Get the integer part  
+	fraction=(temp-mantissa)*16; //Get the decimal part @OVER8=0   
         mantissa<<=4;  
 	mantissa+=fraction;   
-	RCC->AHB1ENR|=1<<0;   	//使能PORTA口时钟    
-	RCC->APB2ENR|=1<<4;  	//使能串口1时钟   
-	GPIO_Set(GPIOA,PIN9|PIN10,GPIO_MODE_AF,GPIO_OTYPE_PP,GPIO_SPEED_50M,GPIO_PUPD_PU);//PA9,PA10,复用功能,上拉输出  
+	RCC->AHB1ENR|=1<<0; //Enable PORTA port clock    
+	RCC->APB2ENR|=1<<4; //Enable serial port 1 clock   
+	GPIO_Set(GPIOA,PIN9|PIN10,GPIO_MODE_AF,GPIO_OTYPE_PP,GPIO_SPEED_50M,GPIO_PUPD_PU);//PA9,PA10, multiplex function, pull-up output  
  	GPIO_AF_Set(GPIOA,9,7);	//PA9,AF7  
 	GPIO_AF_Set(GPIOA,10,7);//PA10,AF7  	     
-	//波特率设置  
- 	USART1->BRR=mantissa; 	//波特率设置	   
-	USART1->CR1&=~(1<<15); 	//设置OVER8=0   
+	//Baud rate setting  
+ 	USART1->BRR=mantissa; //Baud rate setting	   
+	USART1->CR1&=~(1<<15); //Set OVER8=0   
 	  
-	USART1->CR1|=1<<3;  	//串口发送使能   
-	USART1->CR3|=1<<7;      //使能串口1的DMA发送  
+	USART1->CR1|=1<<3; //Serial port transmission enable   
+	USART1->CR3|=1<<7; //Enable DMA transmission of serial port 1  
 	   
-#if EN_USART1_RX		  	//如果使能了接收  	
-	USART1->CR1|=1<<2;  	//串口接收使能  
-	USART1->CR3|=1<<6;      //使能串口1的DMA接收    
-	USART1->CR1|=1<<4;    	//使能空闲中断  	    	
-	MY_NVIC_Init(3,3,USART1_IRQn,2);//组2，最低优先级   
+#if EN_USART1_RX //If reception is enabled  	
+	USART1->CR1|=1<<2; //Serial port reception enable  
+	USART1->CR3|=1<<6; //Enable DMA reception of serial port 1    
+	USART1->CR1|=1<<4; //Enable idle interrupt  	    	
+	MY_NVIC_Init(3,3,USART1_IRQn,2);//Group 2, lowest priority   
 #endif  
-	USART1->CR1|=1<<13;  	//串口使能  
+	USART1->CR1|=1<<13; //Serial port enable  
 }  
 ```
 
-### 2.2两个变量
+### 2.2 Two variables
 
-发送和接收的数据都将以如下两个变量为指定储存器。
+The data sent and received will be stored in the following two variables.
 
 ```
-#define USART_LEN  	50  	//定义最大接收字节数 50  
+#define USART_LEN 50 //Define the maximum number of bytes received 50  
 u8 USART1_TX_BUF[USART_LEN];  
 u8 USART1_RX_BUF[USART_LEN];  
 ```  
-### 2.3 DMA配置
+### 2.3 DMA configuration
 
-（1）使能DMA2时钟，并等待数据流可配置 。
+(1) Enable the DMA2 clock and wait for the data stream to be configurable.
 
-（2）设置外设地址
+(2) Set peripheral address
 
-（3）设置储存器地址
+(3) Set the memory address
 
-（4）设置传输数据量
+(4) Set the amount of data to be transmitted
 
-（5）设置数据流7的配置信息
+(5) Set the configuration information of data flow 7
 
-（6）开启数据流7的传输完成中断
+(6) Turn on the transmission completion interrupt of data stream 7
 
 ```
 /*------------------------------------------------  
 * 函数名：void MYDMA_Config(DMA_Stream_TypeDef *DMA_Streamx,u8 chx,u32 par,u32 mar,u16 ndtr,u8 dir)  
-* 功  能：配置DMA  
-* 参  数：DMA_Streamx: DMA数据流（DMA1_Stream0~7/DMA2_Stream0~7）  
-	     chx: DMA通道选择（范围:0~7）  
-	     par: 外设地址  
-		 mar: 存储器地址  
-		 ndtr: 数据传输量  
-		 dir： 数据传输方向（DMA_DIR_PeripheralToMemory / DMA_DIR_MemoryToPeripheral / DMA_DIR_MemoryToMemory）  
-* 返回值： 无  
+* Function: configure DMA  
+* Parameter: DMA_Streamx: DMA data stream (DMA1_Stream0~7/DMA2_Stream0~7)  
+	     chx: DMA channel selection (range: 0~7)  
+	     par: peripheral address  
+		 mar: memory address  
+		 ndtr: data transfer volume  
+		 dir: Data transfer direction (DMA_DIR_PeripheralToMemory / DMA_DIR_MemoryToPeripheral / DMA_DIR_MemoryToMemory)  
+* Return value: None  
 ------------------------------------------------*/  
 void MYDMA_Config(DMA_Stream_TypeDef *DMA_Streamx,u8 chx,u32 par,u32 mar,u16 ndtr,u8 dir)  
 {   
 	DMA_TypeDef *DMAx;  
 	u8 streamx;  
-	if((u32)DMA_Streamx>(u32)DMA2)//得到当前stream是属于DMA2还是DMA1  
+	if((u32)DMA_Streamx>(u32)DMA2)//Get whether the current stream belongs to DMA2 or DMA1  
 	{  
 		DMAx=DMA2;  
-		RCC->AHB1ENR|=1<<22;//DMA2时钟使能     
+		RCC->AHB1ENR|=1<<22;//DMA2 clock enable     
 	}else   
 	{  
 		DMAx=DMA1;   
- 		RCC->AHB1ENR|=1<<21;//DMA1时钟使能   
+ 		RCC->AHB1ENR|=1<<21;//DMA1 clock enable   
 	}  
-	while(DMA_Streamx->CR&0X01);//等待DMA可配置   
-	streamx=(((u32)DMA_Streamx-(u32)DMAx)-0X10)/0X18;		//得到stream通道号  
- 	if(streamx>=6)DMAx->HIFCR|=0X3D<<(6*(streamx-6)+16);	//清空之前该stream上的所有中断标志  
-	else if(streamx>=4)DMAx->HIFCR|=0X3D<<6*(streamx-4);    //清空之前该stream上的所有中断标志  
-	else if(streamx>=2)DMAx->LIFCR|=0X3D<<(6*(streamx-2)+16);//清空之前该stream上的所有中断标志  
-	else DMAx->LIFCR|=0X3D<<6*streamx;			//清空之前该stream上的所有中断标志  
+	while(DMA_Streamx->CR&0X01);//Waiting for DMA to be configured   
+	streamx=(((u32)DMA_Streamx-(u32)DMAx)-0X10)/0X18; //Get the stream channel number  
+ 	if(streamx>=6)DMAx->HIFCR|=0X3D<<(6*(streamx-6)+16); //Clear all previous interrupt flags on the stream  
+	else if(streamx>=4)DMAx->HIFCR|=0X3D<<6*(streamx-4); //Clear all previous interrupt flags on the stream  
+	else if(streamx>=2)DMAx->LIFCR|=0X3D<<(6*(streamx-2)+16);//Clear all previous interrupt flags on the stream  
+	else DMAx->LIFCR|=0X3D<<6*streamx; //Clear all previous interrupt flags on the stream  
 	    
-	DMA_Streamx->PAR=par;		//DMA外设地址      
-	DMA_Streamx->M0AR=mar;		//DMA存储器0地址        
-	DMA_Streamx->NDTR=ndtr;		//n个数据项  
-	DMA_Streamx->CR=0;			//先全部复位CR寄存器值   
+	DMA_Streamx->PAR=par; //DMA peripheral address      
+	DMA_Streamx->M0AR=mar; //DMA memory 0 address        
+	DMA_Streamx->NDTR=ndtr; //n data items  
+	DMA_Streamx->CR=0; //Reset all CR register values ​​first   
    
 	switch(dir)  
 	{    
-		case DMA_DIR_PeripheralToMemory: //外设到存储器模式  
+		case DMA_DIR_PeripheralToMemory: //Peripheral to memory mode  
 			DMA_Streamx->CR&=~(1<<6);  
 			DMA_Streamx->CR&=~(1<<7);    
 			break;      
@@ -193,37 +193,37 @@ void MYDMA_Config(DMA_Stream_TypeDef *DMA_Streamx,u8 chx,u32 par,u32 mar,u16 ndt
 			break;  
 		default:break;    
 	}  
-	DMA_Streamx->CR|=0<<8;		//非循环模式(即使用普通模式)  
-	DMA_Streamx->CR|=0<<9;		//外设非增量模式  
-	DMA_Streamx->CR|=1<<10;		//存储器增量模式  
-	DMA_Streamx->CR|=0<<11;		//外设数据长度:8位  
-	DMA_Streamx->CR|=0<<13;		//存储器数据长度:8位  
-	DMA_Streamx->CR|=1<<16;		//中等优先级  
-	DMA_Streamx->CR|=0<<21;		//外设突发单次传输  
-	DMA_Streamx->CR|=0<<23;		//存储器突发单次传输  
-	DMA_Streamx->CR|=(u32)chx<<25;//通道选择  
-	//DMA_Streamx->FCR=0X21;	//FIFO控制寄存器  
+	DMA_Streamx->CR|=0<<8; //non-cyclic mode (that is, use normal mode)  
+	DMA_Streamx->CR|=0<<9; //Peripheral non-incremental mode  
+	DMA_Streamx->CR|=1<<10; //Memory increment mode  
+	DMA_Streamx->CR|=0<<11; //Peripheral data length: 8 bits  
+	DMA_Streamx->CR|=0<<13; //Memory data length: 8 bits  
+	DMA_Streamx->CR|=1<<16; //Medium priority  
+	DMA_Streamx->CR|=0<<21; //Peripheral burst single transfer  
+	DMA_Streamx->CR|=0<<23; //Memory burst single transfer  
+	DMA_Streamx->CR|=(u32)chx<<25;//Channel selection  
+	//DMA_Streamx->FCR=0X21; //FIFO control register  
    
-        DMA2_Stream7->CR|=1<<4;		//使能传输完成中断  
+        DMA2_Stream7->CR|=1<<4; //Enable transfer completion interrupt  
         MY_NVIC_Init(2,1,DMA2_Stream7_IRQn,2);  
 }
 ```
-### 2.4 设置MDA状态标志
+### 2.4 Set MDA status flag
 
-> 【注意】：如果连续运行两个发送函数，如下，则可能在第一个还未发送完成时就会直接执行第二次发送。
+> [Note]: If two send functions are run continuously, as shown below, the second send may be executed directly before the first one is sent.
 
 ```
 myDMAprintf(USART1,"usart = %d\tch = %f\r\n",1,1.567);  
 myDMAprintf(USART1,"usart = %d\tch = %f\r\n",1,1.567);  
 ```
-其运行效果如图1所示，第一次仅发送了"us"即被第二次发送覆盖了。
+The operating effect is shown in Figure 1. Only "us" was sent the first time and was overwritten by the second time.
 
-(截图插入无法显示，可在`Pictures\3.PNG`中查看)  
+(Screenshot insertion cannot be displayed and can be viewed in `Pictures\3.PNG`)  
 
 <p align="center"><img src="Pictures/3.png" width="50%"\></p>
-<p align="center" style="color:orange; font-size:14px; color: #999; " >2 运行效果</p>
+<p align="center" style="color:orange; font-size:14px; color: #999; " >2 Running effect</p>
 
-故需设置相应的标志位，对每次发送的状态进行标记，若正在进行传输，则等待，实现如下：
+Therefore, it is necessary to set the corresponding flag bit to mark the status of each transmission. If transmission is in progress, wait. The implementation is as follows:
 
 ```
 typedef enum   
@@ -235,12 +235,12 @@ typedef enum
 volatile DMA_Flag DMA2_Stream7_Flag = IDLE;		//USART1  
 ```
 
-### 2.5 DMA中断函数
+### 2.5 DMA interrupt function
 
-每次传输完成（串口发送完成）后，都会触发一次中断，此时只需在中断函数中清除相应标志位并对发送状态进行标记即可。
+After each transmission is completed (serial port transmission is completed), an interrupt will be triggered. At this time, you only need to clear the corresponding flag bit in the interrupt function and mark the sending status.
 
 ```
-//对应USART1发送  
+//Send corresponding to USART1  
 void DMA2_Stream7_IRQHandler(void)  
 {  
 	if((DMA2->HISR&(1<<27)))  
@@ -251,58 +251,58 @@ void DMA2_Stream7_IRQHandler(void)
 }  
 ```
 
-### 2.6 DMA初始化
+### 2.6 DMA initialization
 
-查询手册可知，串口1发送为DMA2的数据流7，通道4，并为内存到外设模式，而串口1接收为DMA2的数据流5，通道4，并为外设到内存模式。
+According to the manual, serial port 1 sends data stream 7 of DMA2, channel 4, and is in memory-to-peripheral mode, while serial port 1 receives data stream 5 of DMA2, channel 4, and is in peripheral-to-memory mode.
 
-> 【注意】：此处需提前开启一次DMA接收，否则第一次接收会产生错误数据。
+> [Note]: DMA reception needs to be enabled in advance here, otherwise the first reception will generate incorrect data.
 
 ```
-//USART1发送 --- DMA2,数据流7,CH4---USART1_TXD 外设为串口1,存储器为USART1_TX_BUF,长度为:USART_LEN  
+//USART1 sends---DMA2, data stream 7, CH4---USART1_TXD The peripheral is serial port 1, the memory is USART1_TX_BUF, and the length is: USART_LEN  
 MYDMA_Config(DMA2_Stream7,4,(u32)&USART1->DR,(u32)USART1_TX_BUF,USART_LEN,DMA_DIR_MemoryToPeripheral);  
-//USART1接收 --- DMA2,数据流5,CH4---USART1_RXD 外设为串口1,存储器为USART1_RX_BUF,长度为:USART_LEN  
+//USART1 receives---DMA2, data stream 5, CH4---USART1_RXD The peripheral is serial port 1, the memory is USART1_RX_BUF, and the length is: USART_LEN  
 MYDMA_Config(DMA2_Stream5,4,(u32)&USART1->DR,(u32)USART1_RX_BUF,USART_LEN,DMA_DIR_PeripheralToMemory);  
-MYDMA_Enable(DMA2_Stream5,(u32)USART1_RX_BUF,USART_LEN);//开始一次DMA传输！  
+MYDMA_Enable(DMA2_Stream5,(u32)USART1_RX_BUF,USART_LEN);//Start a DMA transfer!  
 ```
 
-### 2.7 开启一次串口DMA传输
+### 2.7 Enable a serial port DMA transmission
 
-配置DMA数据流、内存地址及传输量。
+Configure DMA data flow, memory address and transfer amount.
 
 ```
 void MYDMA_Enable(DMA_Stream_TypeDef *DMA_Streamx, u32 mar, u16 ndtr)  
 {  
-	DMA_Streamx->CR&=~(1<<0); 	//关闭DMA传输   
-	while(DMA_Streamx->CR&0X1);	//确保DMA可以被设置    
-	DMA_Streamx->M0AR=mar;		//DMA存储器地址  
-	DMA_Streamx->NDTR=ndtr;		//DMA传输数据量   
-	DMA_Streamx->CR|=1<<0;		//开启DMA传输  
+	DMA_Streamx->CR&=~(1<<0); //Close DMA transfer   
+	while(DMA_Streamx->CR&0X1); //Make sure DMA can be set    
+	DMA_Streamx->M0AR=mar; //DMA memory address  
+	DMA_Streamx->NDTR=ndtr; //DMA transfer data amount   
+	DMA_Streamx->CR|=1<<0; //Enable DMA transmission  
 }  
 ```
 
-### 2.8 格式化发送
+### 2.8 Formatted sending
 
-该部分已封装为类似printf()的发送函数，大致为3个部分：
+This part has been encapsulated into a sending function similar to printf(), which is roughly divided into 3 parts:
 
-（1）格式化数据为字符串；
+(1) Format data as string;
 
-（2）判断发送状态，若“忙”，则等待。
+(2) Determine the sending status, if "busy", wait.
 
-（3）设置好储存器地址，使能发送并设置发送状态；
+(3) Set the memory address, enable sending and set the sending status;
 
 ```
 /*------------------------------------------------  
-* 函数名：Status myDMAprintf(USART_TypeDef *USARTx, const char *format, ...)  
-* 功  能：仿 printf 函数   
-* 参  数：*USARTx: 串口号  
-	      *pString: 打印内容  
-	      ... : 变量  
-* 返回值： 状态  
+* Function name: Status myDMAprintf(USART_TypeDef *USARTx, const char *format, ...)  
+* Function: imitation printf function   
+* Parameter: *USARTx: serial port number  
+	      *pString: print content  
+	      ... : variable  
+* Return value: status  
 ------------------------------------------------*/  
 Status myDMAprintf(USART_TypeDef *USARTx, const char *format, ...)  
 {  
 	va_list args; 	  
-	u16 len;  
+	u16 only;  
 	  
 	if(format == NULL)  
 		return 1;  
@@ -359,42 +359,41 @@ Status myDMAprintf(USART_TypeDef *USARTx, const char *format, ...)
 }
 ```
 
-### 2.9 串口DMA接收
+### 2.9 Serial port DMA reception
 
-当串口进入空闲状态时即开启一次DMA接收，下次数据到来时DMA会自动搬运数据至指定的储存器（此处为USART1_TX_BUF），搬运完成后会再次触发空闲中断，此时清除空闲中断标志位、DMA传输完成标志位和传输错误标志位，并清除接收内存，开启下一次接收。
+When the serial port enters the idle state, a DMA reception is started. The next time data arrives, the DMA will automatically transfer the data to the specified storage (here USART1_TX_BUF). After the transfer is completed, the idle interrupt will be triggered again, and the idle interrupt flag bit will be cleared. , DMA transmission completion flag bit and transmission error flag bit, and clear the receiving memory to start the next reception.
 
 ```
 void USART1_IRQHandler(void)  
 {  
 	u8 temp;  
-	u16 len;  
+	u16 only;  
 	  
-	if(USART1->SR&(1<<4))//检测到线路空闲  
+	if(USART1->SR&(1<<4))//The line is detected to be idle  
 	{  
-//软件序列清除IDLE标志位  
+//Software sequence clears the IDLE flag  
 		temp = USART1->SR;  
 		temp = USART1->DR;  
 		  
-		DMA2_Stream5->CR &=~(1<<0); //关闭DMA传输,准备重新配置  
-		DMA2->HIFCR|=1<<11;			//清除DMA2_Steam5传输完成标志  
-		DMA2->HIFCR|=1<<9;			//清除DMA2_Steam5传输错误标志  
+		DMA2_Stream5->CR &=~(1<<0); //Close DMA transfer and prepare for reconfiguration  
+		DMA2->HIFCR|=1<<11; //Clear DMA2_Steam5 transfer completion flag  
+		DMA2->HIFCR|=1<<9; //Clear DMA2_Steam5 transmission error flag  
 	  
 		len = USART_LEN - (uint16_t)(DMA2_Stream5->NDTR);  
 		myDMAprintf(USART1,"len = %d,data: %s",len,USART1_RX_BUF);  
 	}  
 	mymemset(USART1_RX_BUF,0,(u32)len);  
-	MYDMA_Enable(DMA2_Stream5,(u32)USART1_RX_BUF,USART_LEN);//开始一次DMA传输！  
+	MYDMA_Enable(DMA2_Stream5,(u32)USART1_RX_BUF,USART_LEN);//Start a DMA transfer!  
 }  
 ```
 
-至此，串口1的发送和接收已全部配置完成，其他5个串口的配置类似。
+At this point, the sending and receiving configurations of serial port 1 have been completed, and the configurations of the other five serial ports are similar.
 
 
-# 参考文章
+# Reference article
 
-[STM32—无需中断来实现使用DMA接收串口数据](https://www.cnblogs.com/lifexy/p/7518488.html) 
+[STM32—No need to interrupt to use DMA to receive serial port data](https://www.cnblogs.com/lifexy/p/7518488.html)
 
-[串口1配合DMA接收不定长数据（空闲中断+DMA接收）](https://www.cnblogs.com/luckytimor/p/7168810.html) 
+[Serial port 1 cooperates with DMA to receive variable length data (idle interrupt + DMA reception)](https://www.cnblogs.com/luckytimor/p/7168810.html)
 
-[STM32 串口采用DMA方式收发](https://blog.csdn.net/gdjason/article/details/51019219) 
-
+[STM32 serial port uses DMA mode to send and receive](https://blog.csdn.net/gdjason/article/details/51019219)
